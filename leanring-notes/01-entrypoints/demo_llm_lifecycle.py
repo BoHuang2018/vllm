@@ -53,9 +53,9 @@ def main():
     # ============================================
     # 📌 設 breakpoint 的好地方：
     #    1. vllm/entrypoints/llm.py line 443  → generate() 入口
-    #    2. vllm/entrypoints/llm.py line 1833 → _run_completion()
-    #    3. vllm/entrypoints/llm.py line 1963 → _add_request() 送進引擎
-    #    4. vllm/entrypoints/llm.py line 1984 → _run_engine() 主循環
+    #    2. vllm/entrypoints/llm.py line 1836 → _run_completion()
+    #    3. vllm/entrypoints/llm.py line 1968 → _add_request() 送進引擎
+    #    4. vllm/entrypoints/llm.py line 1989 → _run_engine() 主循環
     #    5. 關注 self.llm_engine.step() 的返回值
 
     prompts = [
