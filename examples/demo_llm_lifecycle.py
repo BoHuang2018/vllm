@@ -34,6 +34,11 @@ from vllm import LLM, SamplingParams
 
 
 def main():
+    """
+    Note: Necessary environment variables to run this file successfully:
+        TORCHDYNAMO_DISABLE=1;
+        VLLM_HOST_IP=127.0.0.1;
+    """
     print("\n=== STEP 1: Initialising LLM ===")
     llm = LLM(
         model="gpt2",          # 117M-parameter model — fast on CPU
@@ -53,10 +58,15 @@ def main():
     #   stop         : stop if any of these strings is generated
 
     print("=== STEP 2: SamplingParams ===")
+    # params = SamplingParams(
+    #     temperature=0.0,   # greedy — easiest to reason about for a demo
+    #     max_tokens=50,
+    #     stop=["\n\n"],     # stop at paragraph break
+    # )
     params = SamplingParams(
-        temperature=0.0,   # greedy — easiest to reason about for a demo
+        temperature=0.7,  # add randomness to break loops
+        repetition_penalty=1.3,  # penalise recently-seen tokens
         max_tokens=50,
-        stop=["\n\n"],     # stop at paragraph break
     )
     print(f"  temperature={params.temperature}, max_tokens={params.max_tokens}\n")
 
