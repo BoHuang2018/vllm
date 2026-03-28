@@ -29,7 +29,7 @@ def main():
     #
     # 觀察：EngineArgs 包含了哪些配置？
     llm = LLM(
-        model="facebook/opt-125m",  # 很小的模型，適合本地測試
+        model="gpt2",  # 很小的模型，適合本地測試
         # 如果記憶體不夠，試試：
         # model="sshleifer/tiny-gpt2",
         dtype="float32",            # CPU 模式用 float32
@@ -40,12 +40,9 @@ def main():
     print("Step 2: 設定取樣參數")
     # ============================================
     sampling_params = SamplingParams(
-        # temperature=0.8,
+        temperature=0.3,
         top_p=0.95,
-        # max_tokens=30,
-        temperature=0.0,  # greedy — easiest to reason about for a demo
         max_tokens=50,
-        stop=["\n\n"],  # stop at paragraph break
     )
 
     # ============================================
@@ -53,9 +50,9 @@ def main():
     # ============================================
     # 📌 設 breakpoint 的好地方：
     #    1. vllm/entrypoints/llm.py line 443  → generate() 入口
-    #    2. vllm/entrypoints/llm.py line 1833 → _run_completion()
-    #    3. vllm/entrypoints/llm.py line 1963 → _add_request() 送進引擎
-    #    4. vllm/entrypoints/llm.py line 1984 → _run_engine() 主循環
+    #    2. vllm/entrypoints/llm.py line 1836 → _run_completion()
+    #    3. vllm/entrypoints/llm.py line 1968 → _add_request() 送進引擎
+    #    4. vllm/entrypoints/llm.py line 1989 → _run_engine() 主循環
     #    5. 關注 self.llm_engine.step() 的返回值
 
     prompts = [

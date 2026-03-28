@@ -1978,6 +1978,8 @@ class LLM:
 
         request_id = str(next(self.request_counter))
 
+        print(f">>> _add_request | request_id = {request_id} prompt = {str(prompt)}")
+
         return self.llm_engine.add_request(
             request_id,
             prompt,
@@ -2007,8 +2009,12 @@ class LLM:
         outputs: list[_O] = []
         total_in_toks = 0
         total_out_toks = 0
+        print(">>> _run_engine | starting loop")
+        step_count = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            print(f"    step {step_count}: got {len(step_outputs)} outputs, finished = {[o.finished for o in step_outputs]}. total_in_toks = {total_in_toks}. total_out_toks = {total_out_toks}.")
+            step_count += 1
             for output in step_outputs:
                 assert isinstance(output, output_type)
                 if output.finished:
