@@ -29,7 +29,7 @@ def main():
     #
     # 觀察：EngineArgs 包含了哪些配置？
     llm = LLM(
-        model="facebook/opt-125m",  # 很小的模型，適合本地測試
+        model="gpt2",  # 很小的模型，適合本地測試
         # 如果記憶體不夠，試試：
         # model="sshleifer/tiny-gpt2",
         dtype="float32",            # CPU 模式用 float32
@@ -40,12 +40,9 @@ def main():
     print("Step 2: 設定取樣參數")
     # ============================================
     sampling_params = SamplingParams(
-        # temperature=0.8,
+        temperature=0.3,
         top_p=0.95,
-        # max_tokens=30,
-        temperature=0.0,  # greedy — easiest to reason about for a demo
         max_tokens=50,
-        stop=["\n\n"],  # stop at paragraph break
     )
 
     # ============================================
