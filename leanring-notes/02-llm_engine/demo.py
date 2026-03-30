@@ -196,6 +196,9 @@ def main():
             if o.finished:
                 parallel_outputs.append(o)
 
+    # But, parallel_outputs got only one inference result.
+    # Looks like array appending is not a proper way to collect results in this case.
+    # We will know the reason when we dig more in the repo.
     print(f"\n   Got {len(parallel_outputs)} finished outputs:")
     for output in parallel_outputs:
         print(f"   ID: {output.request_id}")
