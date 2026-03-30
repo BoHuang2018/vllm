@@ -225,6 +225,7 @@ class LLMEngine:
         priority: int = 0,
         prompt_text: str | None = None,
     ) -> str:
+        print(f"🔵 [LLMEngine.add_request] request_id={request_id}, prompt_type={type(prompt)}")
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
@@ -300,6 +301,7 @@ class LLMEngine:
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            print(f"🟢 [LLMEngine.step] 1. engine_core.get_output() → {len(outputs.outputs)} outputs")
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
@@ -309,11 +311,13 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+            print(f"🟢 [LLMEngine.step] 2. process_outputs → {len(processed_outputs.request_outputs)} results")
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         with record_function_or_nullcontext("llm_engine step: abort_requests"):
             self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+            print(f"🟢 [LLMEngine.step] 3. abort_requests → {processed_outputs.reqs_to_abort}")
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
