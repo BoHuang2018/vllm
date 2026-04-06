@@ -6,10 +6,11 @@
 ## 1. 總覽
 
 `LLMEngine` 是 vLLM v1 的**核心協調器**。它本身不做推理，而是把工作分配給三個內部組件：
-| 組件 | 職責 | 資料流方向 |
-|--------------------|--------------------------------------------------------------------|-----------|
+
+| 組件                |                         職責                                       | 資料流方向 |
+|--------------------|-------------------------------------------------------------------|-----------|
 | `InputProcessor`   | 把用戶的 prompt → `EngineCoreRequest` (tokenize、validation)        | 輸入 → 引擎 |
-| `EngineCoreClient` | 排程、推理、GPU 計算 | 引擎核心 |
+| `EngineCoreClient` | 排程、推理、GPU 計算                                                 | 引擎核心 |
 | `OutputProcessor`  | 把 `EngineCoreOutputs` → `RequestOutput` (detokenize、stop-string) | 引擎 → 輸出 |
 
 **設計觀察：** 跟 `01-entrypoints` 中的 `LLM` 類一樣，`LLMEngine` 也是一個**協調層**，
@@ -25,6 +26,7 @@ llm.generate(prompts) ──→ _add_request()      ──→    add_request()
 ## 2. 調用鏈全景圖
 
 ### 2.1 The Big Picture (with real class names)
+
 ```
 User Code
     │
@@ -47,7 +49,6 @@ EngineCore  (v1/engine/core.py)                    ← GPU side
     │       └── Worker per GPU  (v1/worker/)       runs actual forward pass
     └── StructuredOutputManager                    JSON schema / regex constraints
 ```
-
 
 ### 2.2 From LLM to LLMEngine
 
@@ -297,41 +298,42 @@ def has_unfinished_requests(self) -> bool:
 因為 OutputProcessor 追蹤所有 `RequestState`，它知道哪些請求還在進行中。
 
 ### 4. EngineCoreClient — IPC 橋
- 
+
 `make_client()` 根據模式返回不同實現：
- 
-| 模式 | 類 | 使用場景 |
-|---|---|---|
-| `multiprocess=False` | `InprocClient` | 默認 / 調試，同進程直接調用 |
-| `multiprocess=True, asyncio=False` | `SyncMPClient` | `LLM` 類（sync 模式） |
-| `multiprocess=True, asyncio=True` | `AsyncMPClient` | `AsyncLLM` / OpenAI API server |
- 
+
+| 模式                                 | 類               | 使用場景                           |
+|------------------------------------|-----------------|--------------------------------|
+| `multiprocess=False`               | `InprocClient`  | 默認 / 調試，同進程直接調用                |
+| `multiprocess=True, asyncio=False` | `SyncMPClient`  | `LLM` 類（sync 模式）               |
+| `multiprocess=True, asyncio=True`  | `AsyncMPClient` | `AsyncLLM` / OpenAI API server |
+
 ### InprocClient（最簡單，適合理解）
- 
+
 ```python
 class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
-        self.engine_core = EngineCore(*args, **kwargs)   # 直接在本進程建立
- 
+        self.engine_core = EngineCore(*args, **kwargs)  # 直接在本進程建立
+
     def get_output(self) -> EngineCoreOutputs:
-        outputs, model_executed = self.engine_core.step_fn()   # 直接調用！
+        outputs, model_executed = self.engine_core.step_fn()  # 直接調用！
         self.engine_core.post_step(model_executed)
         return outputs.get(0) or EngineCoreOutputs()
- 
+
     def add_request(self, request):
         req, wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, wave)
 ```
- 
-**關鍵發現：** 在 `InprocClient` 模式下，`LLMEngine.step()` → `engine_core.get_output()` → `InprocClient.get_output()` → `EngineCore.step_fn()` —— **GPU 推理就發生在這裡！**
- 
+
+**關鍵發現：** 在 `InprocClient` 模式下，`LLMEngine.step()` → `engine_core.get_output()` → `InprocClient.get_output()` →
+`EngineCore.step_fn()` —— **GPU 推理就發生在這裡！**
+
 ### SyncMPClient（多進程模式）
- 
+
 - EngineCore 運行在獨立的 **後台進程**（`EngineCoreProc.run_engine_core()`）
 - 通訊方式：**ZMQ 套接字** + **msgpack 序列化**
 - `add_request()` → 序列化 → ZMQ PUSH → 後台進程接收
 - `get_output()` → ZMQ PULL → 反序列化 → `EngineCoreOutputs`
- 
+
 ---
 
 ## 4. 架構洞察
