@@ -282,7 +282,7 @@ self.engine_core.add_request(request)
 - EngineCore 不知道 stop string → 它只管生成 token
 - OutputProcessor 在 detokenize 時檢測到 stop string
 - 然後通過 `step()` 的第 3 步回報給 EngineCore 中止該請求
-- 這是一���跨組件的協作流程
+- 這是一跨組件的協作流程
 
 **關鍵一句話：** `LLMEngine.step()` **不調用 GPU**。它只是收集 EngineCore 已經算好的結果。
 
