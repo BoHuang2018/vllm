@@ -666,6 +666,367 @@ def scenario_new_vs_cached() -> None:
 
 
 # ─────────────────────────────────────────────
+# SCENARIO 7 — InputProcessor pipeline
+# ─────────────────────────────────────────────
+
+import uuid as _uuid
+
+
+def scenario_input_processor() -> None:
+    section("SCENARIO 7 — InputProcessor pipeline")
+    print("""
+  Simulates what InputProcessor.process_inputs() does before a request
+  ever reaches the scheduler.
+
+  Stages (from input_processor.py line 195):
+    1. Validate SamplingParams / PoolingParams
+    2. Tokenize the prompt (if raw text)
+    3. Validate prompt length against max_model_len
+    4. Validate token IDs against vocab_size
+    5. Finalise SamplingParams (merge generation config, EOS tokens)
+    6. Assign internal request ID (external_id + 8 random chars)
+    7. Build EngineCoreRequest
+
+  Shows three cases:
+    (a) Happy path
+    (b) Prompt too long → ValueError before the request ever reaches scheduler
+    (c) max_tokens=None → auto-filled as max_model_len - prompt_len
+""")
+
+    MAX_MODEL_LEN = 32
+    VOCAB_SIZE    = 1000
+
+    class MockSamplingParams:
+        def __init__(self, max_tokens=None, stop=None, temperature=1.0):
+            self.max_tokens  = max_tokens
+            self.stop        = stop or []
+            self.temperature = temperature
+
+        def verify(self, max_model_len: int) -> None:
+            if self.temperature < 0:
+                raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+            if self.max_tokens is not None and self.max_tokens <= 0:
+                raise ValueError(f"max_tokens must be > 0, got {self.max_tokens}")
+
+        def fill_max_tokens(self, prompt_len: int, max_model_len: int) -> None:
+            if self.max_tokens is None:
+                self.max_tokens = max_model_len - prompt_len
+
+        def __repr__(self):
+            return (f"SamplingParams(max_tokens={self.max_tokens}, "
+                    f"stop={self.stop}, temperature={self.temperature})")
+
+    class MockInputProcessor:
+        """Mirrors the key steps in InputProcessor.process_inputs()."""
+
+        def __init__(self, max_model_len: int, vocab_size: int):
+            self.max_model_len = max_model_len
+            self.vocab_size    = vocab_size
+            # Simulate a simple vocabulary: each word maps to a fixed token ID
+            self._fake_vocab = {w: i for i, w in enumerate(
+                "the quick brown fox jumps over lazy dog tell me joke why did "
+                "chicken cross road to get other side".split()
+            )}
+
+        def _tokenize(self, text: str) -> list[int]:
+            """Extremely simplified tokenizer: split on spaces."""
+            return [self._fake_vocab.get(w.lower(), 999) for w in text.split()]
+
+        def _validate_params(self, params: MockSamplingParams) -> None:
+            params.verify(self.max_model_len)
+
+        def _validate_length(self, prompt_token_ids: list[int]) -> None:
+            n = len(prompt_token_ids)
+            if n == 0:
+                raise ValueError("Prompt cannot be empty")
+            if n >= self.max_model_len:
+                raise ValueError(
+                    f"Prompt length {n} >= max_model_len {self.max_model_len}. "
+                    f"No room for output tokens."
+                )
+
+        def _validate_token_ids(self, prompt_token_ids: list[int]) -> None:
+            bad = [t for t in prompt_token_ids if t >= self.vocab_size]
+            if bad:
+                raise ValueError(f"Token IDs out of vocabulary: {bad}")
+
+        @staticmethod
+        def _assign_request_id(external_req_id: str) -> str:
+            """
+            Mirrors InputProcessor.assign_request_id() (line 175).
+            Appends 8 random chars to ensure uniqueness even if the
+            user sends duplicate request IDs.
+            """
+            suffix = str(_uuid.uuid4()).replace("-", "")[:8]
+            return f"{external_req_id}-{suffix}"
+
+        def process_inputs(
+            self,
+            request_id: str,
+            prompt: str,
+            params: MockSamplingParams,
+        ) -> dict:
+            """Returns a dict mimicking EngineCoreRequest fields."""
+            # 1. Validate params
+            self._validate_params(params)
+
+            # 2. Tokenize
+            prompt_token_ids = self._tokenize(prompt)
+            info(f"tokenized '{prompt}' → {prompt_token_ids}")
+
+            # 3. Validate length
+            self._validate_length(prompt_token_ids)
+
+            # 4. Validate token IDs
+            self._validate_token_ids(prompt_token_ids)
+
+            # 5. Finalise SamplingParams
+            params.fill_max_tokens(len(prompt_token_ids), self.max_model_len)
+            info(f"sampling_params after finalisation: {params}")
+
+            # 6. Assign internal ID
+            internal_id = self._assign_request_id(request_id)
+            info(f"external_req_id={request_id!r}  →  request_id={internal_id!r}")
+
+            # 7. Build EngineCoreRequest (as dict for simplicity)
+            return dict(
+                request_id       = internal_id,
+                external_req_id  = request_id,
+                prompt_token_ids = prompt_token_ids,
+                sampling_params  = params,
+            )
+
+    proc = MockInputProcessor(max_model_len=MAX_MODEL_LEN, vocab_size=VOCAB_SIZE)
+
+    # ── (a) Happy path ────────────────────────────────────────────────────────
+    step_header("(a) happy path")
+    try:
+        req = proc.process_inputs("req-42", "Tell me a joke", MockSamplingParams(max_tokens=10))
+        ok(f"EngineCoreRequest built: {req}")
+    except ValueError as e:
+        bad(f"Unexpected error: {e}")
+
+    # ── (b) Prompt too long ───────────────────────────────────────────────────
+    step_header("(b) prompt too long (35 tokens > max_model_len=32)")
+    long_prompt = " ".join(["the"] * 35)
+    try:
+        proc.process_inputs("req-43", long_prompt, MockSamplingParams(max_tokens=5))
+        bad("Should have raised!")
+    except ValueError as e:
+        ok(f"Correctly rejected: {e}")
+
+    # ── (c) max_tokens=None auto-filled ──────────────────────────────────────
+    step_header("(c) max_tokens=None → auto-filled")
+    try:
+        params = MockSamplingParams(max_tokens=None)
+        info(f"sampling_params before: {params}")
+        req = proc.process_inputs("req-44", "Tell me a joke", params)
+        ok(f"max_tokens filled to: {req['sampling_params'].max_tokens}  "
+           f"(= {MAX_MODEL_LEN} - {len(req['prompt_token_ids'])})")
+    except ValueError as e:
+        bad(f"Unexpected error: {e}")
+
+
+# ─────────────────────────────────────────────
+# SCENARIO 8 — OutputProcessor: detokenization and stop strings
+# ─────────────────────────────────────────────
+
+def scenario_output_processor() -> None:
+    section("SCENARIO 8 — OutputProcessor: detokenization and stop strings")
+    print("""
+  Simulates what OutputProcessor.process_outputs() does after each
+  GPU step returns token IDs.
+
+  Key points:
+    • IncrementalDetokenizer accumulates token IDs and decodes them
+      incrementally (can't decode single tokens independently due to
+      multi-byte / BPE boundary issues).
+    • Stop-string detection happens HERE (in the frontend), not in EngineCore.
+    • When a stop string is found, the request is added to reqs_to_abort —
+      the scheduler is then told to stop scheduling it.
+    • DELTA mode: emit partial text each step (streaming).
+    • FINAL_ONLY mode: emit nothing until finish (batch).
+
+  Shows three cases:
+    (a) DELTA mode — text emitted incrementally, then natural end
+    (b) FINAL_ONLY mode — nothing emitted until finish
+    (c) Stop string detected mid-stream → reqs_to_abort
+""")
+
+    # ── Minimal incremental detokenizer simulation ────────────────────────────
+
+    # A fake "vocabulary": token ID → word fragment
+    FAKE_VOCAB = {
+        10: "Why",  11: " did",  12: " the",  13: " chicken",
+        14: " cross", 15: " the",  16: " road", 17: "?",
+        18: "\nTo",  19: " get",  20: " to",   21: " the",
+        22: " other", 23: " side", 24: "!",
+        25: "\n",    26: "END",   # 26 = EOS
+    }
+    EOS_TOKEN_ID = 26
+
+    class SimpleDetokenizer:
+        """
+        Mirrors IncrementalDetokenizer behaviour:
+          - accumulates output tokens
+          - checks for stop strings in the decoded text
+          - supports delta (streaming) vs full output
+        """
+        def __init__(self, stop: list[str]):
+            self.stop           = stop
+            self.output_tokens: list[int] = []
+            self._text_so_far   = ""
+            self._last_sent_len = 0   # for delta mode
+
+        def update(self, new_token_ids: list[int]) -> str | None:
+            """
+            Append tokens, return stop_string if matched, else None.
+            Mirrors IncrementalDetokenizer.update().
+            """
+            for tok in new_token_ids:
+                self.output_tokens.append(tok)
+                fragment = FAKE_VOCAB.get(tok, f"<{tok}>")
+                self._text_so_far += fragment
+                for s in self.stop:
+                    if s in self._text_so_far:
+                        return s   # stop string found
+            return None
+
+        def get_delta_text(self) -> str:
+            """New text since last call (DELTA mode)."""
+            new_text = self._text_so_far[self._last_sent_len:]
+            self._last_sent_len = len(self._text_so_far)
+            return new_text
+
+        @property
+        def full_text(self) -> str:
+            return self._text_so_far
+
+    class SimpleOutputProcessor:
+        """
+        Mirrors OutputProcessor.process_outputs() core loop.
+        Tracks request states; each state has a detokenizer.
+        """
+
+        def __init__(self):
+            # req_id → (detokenizer, output_kind, external_req_id)
+            self.states: dict[str, tuple[SimpleDetokenizer, str, str]] = {}
+
+        def add_request(
+            self,
+            internal_id: str,
+            external_id: str,
+            output_kind: str,   # "DELTA" or "FINAL_ONLY"
+            stop: list[str],
+        ) -> None:
+            self.states[internal_id] = (SimpleDetokenizer(stop), output_kind, external_id)
+
+        def process_outputs(
+            self, outputs: list[tuple[str, list[int], bool]]
+        ) -> tuple[list[dict], list[str]]:
+            """
+            outputs: list of (req_id, new_token_ids, engine_said_finished)
+            Returns: (request_outputs, reqs_to_abort)
+            """
+            request_outputs: list[dict] = []
+            reqs_to_abort:   list[str]  = []
+
+            for req_id, new_token_ids, engine_finished in outputs:
+                if req_id not in self.states:
+                    continue  # already aborted
+                detok, output_kind, external_id = self.states[req_id]
+
+                # 1. Detokenize; check for stop string
+                stop_string = detok.update(new_token_ids)
+                finish_reason = None
+                if engine_finished:
+                    finish_reason = "length"   # max_tokens reached
+                if stop_string:
+                    finish_reason = "stop"
+
+                # 2. Build output based on mode
+                if output_kind == "DELTA":
+                    delta = detok.get_delta_text()
+                    if delta or finish_reason:
+                        request_outputs.append(dict(
+                            request_id  = external_id,  # ← user sees external ID
+                            delta_text  = delta,
+                            finish_reason = finish_reason,
+                        ))
+                elif output_kind == "FINAL_ONLY":
+                    if finish_reason:  # only emit on finish
+                        request_outputs.append(dict(
+                            request_id  = external_id,
+                            full_text   = detok.full_text,
+                            finish_reason = finish_reason,
+                        ))
+
+                # 3. Clean up finished requests; signal abort if needed
+                if finish_reason:
+                    del self.states[req_id]
+                    if finish_reason == "stop" and not engine_finished:
+                        # Detokenizer found stop string BEFORE EngineCore did.
+                        # Must tell scheduler: stop scheduling this request.
+                        reqs_to_abort.append(req_id)
+                        info(f"reqs_to_abort += [{req_id!r}]  "
+                             f"(stop string '{stop_string}' detected by detokenizer)")
+
+            return request_outputs, reqs_to_abort
+
+    # ── (a) DELTA mode, natural end (EOS token) ───────────────────────────────
+    step_header("(a) DELTA mode — incremental streaming, natural end")
+
+    op = SimpleOutputProcessor()
+    op.add_request("req-42-a3f8b2c1", "req-42", "DELTA", stop=[])
+
+    # Simulate 5 decode steps: token IDs from the "chicken" joke
+    steps = [[10], [11, 12, 13], [14, 15, 16, 17], [18, 19, 20, 21, 22, 23, 24], [26]]
+    for i, token_ids in enumerate(steps, 1):
+        engine_done = (EOS_TOKEN_ID in token_ids)
+        outs, aborts = op.process_outputs([("req-42-a3f8b2c1", token_ids, engine_done)])
+        for o in outs:
+            marker = ok if o.get("finish_reason") else info
+            marker(f"step {i}: delta={o.get('delta_text')!r}  finish={o.get('finish_reason')}")
+
+    # ── (b) FINAL_ONLY mode — nothing until done ──────────────────────────────
+    step_header("(b) FINAL_ONLY mode — silent until finish")
+
+    op2 = SimpleOutputProcessor()
+    op2.add_request("req-43-b9d7e1f2", "req-43", "FINAL_ONLY", stop=[])
+
+    steps2 = [[10], [11, 12, 13], [14, 15, 16, 17], [18, 19, 20, 21, 22, 23, 24], [26]]
+    for i, token_ids in enumerate(steps2, 1):
+        engine_done = (EOS_TOKEN_ID in token_ids)
+        outs, _ = op2.process_outputs([("req-43-b9d7e1f2", token_ids, engine_done)])
+        if outs:
+            ok(f"step {i}: FINAL output emitted → text={outs[0].get('full_text')!r}  "
+               f"finish={outs[0].get('finish_reason')}")
+        else:
+            info(f"step {i}: no output (FINAL_ONLY, not done yet)")
+
+    # ── (c) Stop string detected mid-stream ───────────────────────────────────
+    step_header("(c) Stop string '?' detected — triggers reqs_to_abort")
+
+    op3 = SimpleOutputProcessor()
+    op3.add_request("req-44-c2a1b3d4", "req-44", "DELTA", stop=["?"])
+
+    # Scheduler is still running, will keep sending tokens until told to stop.
+    # After '?' appears, detokenizer catches it; engine has NOT finished yet.
+    steps3 = [[10], [11, 12, 13], [14, 15, 16, 17]]  # ends with '?'
+    for i, token_ids in enumerate(steps3, 1):
+        outs, aborts = op3.process_outputs([("req-44-c2a1b3d4", token_ids, False)])
+        for o in outs:
+            if o.get("finish_reason"):
+                warn(f"step {i}: stop string triggered → text={o.get('delta_text')!r}  "
+                     f"finish={o.get('finish_reason')}")
+            else:
+                info(f"step {i}: delta={o.get('delta_text')!r}")
+        if aborts:
+            bad(f"  → reqs_to_abort sent to scheduler: {aborts}")
+            info("  → scheduler.finish_requests(reqs_to_abort, FINISHED_ABORTED)")
+
+
+# ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 
@@ -676,6 +1037,8 @@ if __name__ == "__main__":
     scenario_prefix_cache()
     scenario_no_chunked_prefill()
     scenario_new_vs_cached()
+    scenario_input_processor()
+    scenario_output_processor()
 
     print(f"\n{BOLD}{'─' * 68}{RESET}")
     print(f"{BOLD}  All scenarios complete.{RESET}")

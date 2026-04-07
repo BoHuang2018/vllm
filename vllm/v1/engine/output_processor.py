@@ -596,7 +596,7 @@ class OutputProcessor:
         If you need to touch every element of the batch, do it from
         within the loop below.
         """
-
+        print(f"🔵 OutputProcessor.process_outputs | received {len(engine_core_outputs)} outputs")
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
@@ -634,6 +634,9 @@ class OutputProcessor:
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
+
+            print(f"   → req_id={req_state.request_id} | new_tokens={len(new_token_ids)} | "
+                  f"stop_reason={stop_reason} | finish_reason={finish_reason}")
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
@@ -675,6 +678,8 @@ class OutputProcessor:
                     )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
+
+        print(f"🟢 Returning {len(request_outputs)} outputs | reqs_to_abort={reqs_to_abort}")
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,

@@ -35,11 +35,11 @@ logger = init_logger(__name__)
 
 class InputProcessor:
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        renderer: BaseRenderer | None = None,
-        *,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+            self,
+            vllm_config: VllmConfig,
+            renderer: BaseRenderer | None = None,
+            *,
+            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = model_config = vllm_config.model_config
@@ -79,9 +79,9 @@ class InputProcessor:
         return self.renderer.get_tokenizer()
 
     def _validate_params(
-        self,
-        params: SamplingParams | PoolingParams,
-        supported_tasks: tuple[SupportedTask, ...],
+            self,
+            params: SamplingParams | PoolingParams,
+            supported_tasks: tuple[SupportedTask, ...],
     ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if isinstance(params, SamplingParams):
@@ -99,8 +99,8 @@ class InputProcessor:
             )
 
             if (
-                params.thinking_token_budget is not None
-                and self.vllm_config.reasoning_config is None
+                    params.thinking_token_budget is not None
+                    and self.vllm_config.reasoning_config is None
             ):
                 raise ValueError(
                     "thinking_token_budget is set but reasoning_config is "
@@ -155,9 +155,9 @@ class InputProcessor:
             )
 
     def _get_mm_identifier(
-        self,
-        mm_hash: str,
-        lora_request: LoRARequest | None,
+            self,
+            mm_hash: str,
+            lora_request: LoRARequest | None,
     ) -> str:
         """
         When enable_tower_connector_lora is True, multi-modal embeddings
@@ -165,9 +165,9 @@ class InputProcessor:
         generated based on the LoRA request to prevent incorrect cache hits.
         """
         if (
-            lora_request is None
-            or self.lora_config is None
-            or not self.lora_config.enable_tower_connector_lora
+                lora_request is None
+                or self.lora_config is None
+                or not self.lora_config.enable_tower_connector_lora
         ):
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
@@ -193,19 +193,20 @@ class InputProcessor:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
-        self,
-        request_id: str,
-        prompt: PromptType | EngineInput,
-        params: SamplingParams | PoolingParams,
-        supported_tasks: tuple[SupportedTask, ...],
-        arrival_time: float | None = None,
-        lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
-        data_parallel_rank: int | None = None,
-        resumable: bool = False,
+            self,
+            request_id: str,
+            prompt: PromptType | EngineInput,
+            params: SamplingParams | PoolingParams,
+            supported_tasks: tuple[SupportedTask, ...],
+            arrival_time: float | None = None,
+            lora_request: LoRARequest | None = None,
+            tokenization_kwargs: dict[str, Any] | None = None,
+            trace_headers: Mapping[str, str] | None = None,
+            priority: int = 0,
+            data_parallel_rank: int | None = None,
+            resumable: bool = False,
     ) -> EngineCoreRequest:
+        print(f"🔵 InputProcessor.process_inputs request_id={request_id} prompt_type={type(prompt)}")
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
@@ -282,14 +283,14 @@ class InputProcessor:
 
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
-
+        print(f"   → mm_features count: {len(mm_features) if 'mm_features' in locals() else 0}")
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
             decoder_mm_hashes = decoder_inputs["mm_hashes"]
 
             if not all(
-                isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
+                    isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
             ):
                 raise ValueError(
                     f"mm_hashes must contain only strings, got: {decoder_mm_hashes}. "
@@ -318,6 +319,7 @@ class InputProcessor:
                     )
                 )
 
+        print(f"🟢 Returning EngineCoreRequest | tokens={len(request.prompt_token_ids) if request.prompt_token_ids else 'embeds'} | mm={len(request.mm_features) if request.mm_features else 0}")
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -335,9 +337,9 @@ class InputProcessor:
         )
 
     def _validate_prompt_len(
-        self,
-        prompt_len: int,
-        prompt_type: Literal["encoder", "decoder"],
+            self,
+            prompt_len: int,
+            prompt_type: Literal["encoder", "decoder"],
     ):
         if self.skip_prompt_length_check:
             return
@@ -382,9 +384,9 @@ class InputProcessor:
             )
 
     def _validate_model_input(
-        self,
-        prompt_input: SingletonInput,
-        prompt_type: Literal["encoder", "decoder"],
+            self,
+            prompt_input: SingletonInput,
+            prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -434,9 +436,9 @@ class InputProcessor:
                 raise ValueError(f"Token id {max_input_id} is out of vocabulary")
 
     def _validate_model_inputs(
-        self,
-        encoder_input: SingletonInput | None,
-        decoder_input: SingletonInput,
+            self,
+            encoder_input: SingletonInput | None,
+            decoder_input: SingletonInput,
     ):
         if encoder_input is not None:
             self._validate_model_input(encoder_input, prompt_type="encoder")

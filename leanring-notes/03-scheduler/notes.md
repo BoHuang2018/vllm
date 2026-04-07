@@ -1,17 +1,5 @@
 # Step 03 — Request Entry, Exit, and Scheduling
 
-## Big Map of Learning Progression
-```
-LLMEngine.add_request()
-│
-▼
-InputProcessor.process_inputs()   ← 你現在要學的 ⭐
-│
-▼
-EngineCoreRequest（含 prompt_token_ids / mm_features / sampling_params ...）
-```
-
-
 > **Files covered** (in reading order):
 > ```
 > vllm/v1/engine/input_processor.py   444 L  ← entry gate: raw prompt → EngineCoreRequest
@@ -37,6 +25,16 @@ EngineCoreRequest（含 prompt_token_ids / mm_features / sampling_params ...）
 ---
 
 ## 1. InputProcessor (`vllm/v1/engine/input_processor.py`)
+
+```
+LLMEngine.add_request()
+│
+▼
+InputProcessor.process_inputs()   ← 你現在要學的 ⭐
+│
+▼
+EngineCoreRequest（含 prompt_token_ids / mm_features / sampling_params ...）
+```
 
 ### Where it sits
 
@@ -162,10 +160,69 @@ EngineCoreRequest   ← 交給 EngineCoreClient.add_request()
 ---
 
 ## 2. OutputProcessor (`vllm/v1/engine/output_processor.py`)
-
+```
+EngineCore.get_output() → EngineCoreOutputs（raw tokens）
+│
+▼
+OutputProcessor.process_outputs()   ← 你現在要學的 ⭐
+│
+▼
+RequestOutput / PoolingRequestOutput（含 text、finish_reason、logprobs）
+```
 ### Where it sits
 
 `OutputProcessor` also lives in the **frontend process**. It receives raw token IDs from `EngineCore` and converts them into decoded text + metadata.
+
+`OutputProcessor` 是 **LLMEngine.step()** 從 EngineCore 拿到原始輸出後的**最後一道處理關卡**。  
+它負責把「引擎內部的 raw token IDs + finish reason」轉換成「用戶最終看到的 `RequestOutput` / `PoolingRequestOutput`」。
+
+**核心職責**：
+- 維護每個 request 的狀態（`RequestState`）
+- Incremental detokenization（邊生成邊解碼）
+- Stop-string / stop-token 檢測
+- Streaming 控制（`DELTA` vs `FINAL_ONLY` + `stream_interval`）
+- Logprobs 處理
+- Parallel sampling（n > 1）的 parent/child 聚合
+- 請求完成後的 abort 回報 + 統計更新
+- 支援 streaming input（prompt 邊生成邊更新）
+
+
+**設計觀察**：  
+跟 `InputProcessor` 一樣，這層也是**薄協調 + 後處理**。真正重的 detokenize 工作委託給 `IncrementalDetokenizer` 和 `LogprobsProcessor`。所有「輸出端」的複雜邏輯（stop string、streaming interval、parent aggregation）都在這裡完成。
+
+**調用鏈全景圖**
+```text
+LLMEngine.step()
+│
+├── 1️⃣ outputs = self.engine_core.get_output()
+│
+├── 2️⃣ processed = self.output_processor.process_outputs(
+│       outputs.outputs,
+│       engine_core_timestamp=...,
+│       iteration_stats=...)
+│       ← 這裡！
+│
+├── 3️⃣ self.engine_core.abort_requests(processed.reqs_to_abort)
+│
+└── return processed.request_outputs
+```
+
+**OutputProcessor 內部主要流程**
+```text
+process_outputs(engine_core_outputs)
+│
+├── for 每個 EngineCoreOutput：
+│       ├── 取出 RequestState（或略過已完成）
+│       ├── 更新 stats
+│       ├── detokenizer.update(new_token_ids)
+│       ├── 檢查 stop_string / finish_reason
+│       ├── 決定是否要 emit output（考慮 stream_interval）
+│       └── 呼叫 make_request_output() → 產生 RequestOutput
+│
+├── 收集 reqs_to_abort（stop string 觸發的）
+└── 返回 OutputProcessorOutput(request_outputs, reqs_to_abort)
+```
+
 
 ### Key state: `RequestState`
 
@@ -203,42 +260,21 @@ text_chunk = detokenizer.get_next_output_text(finished, delta=True)
 # delta=False → full accumulated text so far   (batch)
 ```
 
-### `process_outputs()` — the main loop (line 572)
+### `process_outputs()` — the main loop (line 572, 被 LLMEngine.step() 直接呼叫)
 
-```python
-for engine_core_output in engine_core_outputs:
-    req_state = request_states[req_id]
+這是整個 class 的心臟（被 LLMEngine.step() 直接呼叫）：
 
-    # 1. Stats (if log_stats)
-    _update_stats_from_output(req_state, engine_core_output, ...)
+主要步驟：
 
-    # 2. Detokenize + stop-string detection
-    stop_string = req_state.detokenizer.update(new_token_ids, finish_reason == STOP)
-    if stop_string:
-        finish_reason = FinishReason.STOP   # OutputProcessor caught it
-        stop_reason   = stop_string
-
-    # 3. Logprobs
-    req_state.logprobs_processor.update_from_output(engine_core_output)
-
-    # 4. Build RequestOutput
-    request_output = req_state.make_request_output(
-        new_token_ids, pooling_output, finish_reason, stop_reason, ...)
-
-    # 5. Route
-    if req_state.queue:
-        req_state.queue.put(request_output)     # AsyncLLM → generator task awaits
-    else:
-        request_outputs.append(request_output)  # LLMEngine → returned to caller
-
-    # 6. Cleanup on finish
-    if finish_reason is not None:
-        _finish_request(req_state)
-        if not engine_core_output.finished:
-            reqs_to_abort.append(req_id)        # tell scheduler to stop scheduling this
-
-return OutputProcessorOutput(request_outputs, reqs_to_abort)
-```
+* 遍歷每個 EngineCoreOutput
+  * 取得對應 RequestState
+  * 更新 iteration stats
+  * req_state.detokenizer.update(new_token_ids, is_stop=...)
+  * 偵測 stop string → 設定 finish_reason = STOP
+  * 呼叫 req_state.make_request_output(...) 產生輸出物件
+  * 如果需要 abort（stop string 觸發）→ 加入 reqs_to_abort
+  * 處理 streaming input update（如果有 pending chunk）
+  * 最後返回 OutputProcessorOutput
 
 ### The stop-string abort loop
 
