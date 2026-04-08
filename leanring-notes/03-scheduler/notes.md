@@ -38,12 +38,14 @@ EngineCoreRequest（含 prompt_token_ids / mm_features / sampling_params ...）
 
 ### Where it sits
 
-`InputProcessor` lives in the **frontend process** (same as `LLMEngine`). It never crosses the IPC boundary. Its job: transform a raw user request into a fully-validated `EngineCoreRequest` the scheduler can consume.
+`InputProcessor` lives in the **frontend process** (same as `LLMEngine`). It never crosses the IPC boundary. 
+
+Its job: transform a raw user request into a fully-validated `EngineCoreRequest` the scheduler can consume.
 
 `InputProcessor` 是 **LLMEngine.add_request()** 收到用戶輸入後的**第一道真正處理關卡**。  
 它負責把「人類可讀的 prompt（文字 / tokens / 多模態）」轉換成「引擎內部可直接使用的 `EngineCoreRequest`」。
 
-**核心職責（對照 LLMEngine 筆記）**：
+**核心職責**：
 - 參數驗證（SamplingParams / PoolingParams）
 - LoRA 相容性檢查
 - Tokenization + Multimodal 預處理（委託給 `InputPreprocessor`）
@@ -303,23 +305,33 @@ In `AsyncLLM` mode each request has a `RequestOutputCollector` queue. If the pro
 
 ---
 
-## 3. The One Invariant That Explains the Scheduler
+## 3. Scheduler
+>```
+> 源碼文件：`vllm/v1/core/sched/scheduler.py`
+> 核心類：`class Scheduler`
+> 重要資料類：`SchedulerOutput`、`NewRequestData`、`CachedRequestData`（位於 `vllm/v1/core/sched/output.py`）
+>```
 
-The docstring at the top of `schedule()` (line 342):
+## 1. 總覽
 
-```
-There is no "decoding phase" nor "prefill phase" in the scheduler.
-Each request just has num_computed_tokens and num_tokens_with_spec.
-At each step the scheduler tries to assign tokens so that each request's
-num_computed_tokens can catch up its num_tokens_with_spec.
-```
+`Scheduler` 是 vLLM v1 **真正的排程大腦**，負責在**每一輪 step** 決定：
+- 哪些請求要繼續跑（running）
+- 要分配多少新 token（prefill / decode / spec decode）
+- 如何處理 prefix cache、chunked prefill、preemption
 
-| Field | Meaning |
-|---|---|
-| `num_computed_tokens` | tokens already processed (KV computed) |
-| `num_tokens_with_spec` | tokens that *should* be processed (prompt + output so far + spec drafts) |
+**最核心的不變式（The One Invariant）**  
+檔案最上方 `schedule()` 的 docstring 說得最清楚 (line 342)：
 
-```
+> There is no "decoding phase" nor "prefill phase" in the scheduler.  
+> Each request just has `num_computed_tokens` and `num_tokens_with_spec`.  
+> At each step the scheduler tries to assign tokens so that each request's `num_computed_tokens` can catch up its `num_tokens_with_spec`.
+
+| 欄位                     | 意義                                                |
+|--------------------------|---------------------------------------------------|
+| `num_computed_tokens`    | 已經計算過 KV 的 token 數量                               |
+| `num_tokens_with_spec`   | 目前「應該」要計算到的 token 數量（prompt + 已輸出(output so far) + spec draft） |
+
+```python
 num_new_tokens = num_tokens_with_spec + num_output_placeholders - num_computed_tokens
 num_new_tokens = min(num_new_tokens, token_budget)
 ```
@@ -330,26 +342,41 @@ This covers every mode:
 - **Decode**: `num_new_tokens = 1`
 - **Speculative decode**: spec tokens inflate `num_tokens_with_spec`
 
----
-
-## 4. Scheduler Package Layout
-
-```
-vllm/v1/core/sched/
-├── scheduler.py        2305 L  ← Scheduler class
-├── output.py            261 L  ← SchedulerOutput, NewRequestData, CachedRequestData
-├── request_queue.py     208 L  ← FCFSRequestQueue, PriorityRequestQueue
-├── interface.py         243 L  ← SchedulerInterface (abstract base)
-└── async_scheduler.py    60 L  ← thin async wrapper
-
-vllm/v1/core/
-├── kv_cache_manager.py   ← block allocator (called by scheduler)
-└── kv_cache_utils.py     ← block hashing, prefix matching
-```
+設計觀察：Scheduler 完全不區分 prefill/decode，只有 token 追趕的概念。這就是 vLLM v1 比 v0 更簡潔、更強大的原因。
 
 ---
 
-## 5. The Three Queues
+### 調用鏈全景圖
+
+```
+LLMEngine.step()
+    │
+    ├── EngineCoreClient.get_output() → EngineCore.step_fn()
+    │                                 │
+    │                                 ▼
+    │                           Scheduler.schedule()   ← 你現在要學的 ⭐
+    │                                 │
+    │                                 ▼
+    │                         SchedulerOutput（送給 GPU Worker）
+    │
+    └── EngineCore.execute_model(...) → GPU forward
+            │
+            ▼
+        Scheduler.update_from_output(...)   ← 回饋 loop
+```
+
+---
+
+### Scheduler 內部三大階段（schedule()）
+```text
+Phase 1: 處理 running requests（可能 preemption）
+    │
+Phase 2: 從 waiting queue 挑新請求（prefix cache + allocate KV）
+    │
+Phase 3: 建構 SchedulerOutput（NewRequestData + CachedRequestData）
+```
+
+### The Three Queues of Scheduler
 
 ```
 self.waiting          RequestQueue   WAITING or PREEMPTED requests
@@ -364,8 +391,6 @@ Global constraints:
 - `max_num_scheduled_tokens` — max tokens per step (e.g. 8192)
 
 ---
-
-## 6. Scheduler Data Structures (`output.py`)
 
 ### `SchedulerOutput` — message sent to the GPU worker each step
 
@@ -385,7 +410,7 @@ class SchedulerOutput:
     new_block_ids_to_zero:        list[int] | None        # zero fresh GPU memory
 ```
 
-### `NewRequestData` vs `CachedRequestData` — the bandwidth optimization
+### `NewRequestData` vs `CachedRequestData` — the bandwidth optimization（極致頻寬優化）
 
 Workers maintain a persistent `InputBatch` on the GPU side. `NewRequestData` ships the **full payload** once:
 
@@ -407,6 +432,10 @@ new_token_ids[]       — only used in pipeline-parallel mode
 
 A 4096-token prompt (16 KB of ints) crosses the IPC pipe **exactly once**. All subsequent decode steps ship only a handful of scalars.
 
+* NewRequestData：第一次送完整 payload（prompt_token_ids、mm_features、sampling_params、完整 block list）
+* CachedRequestData：之後每次只送 delta（new_block_ids、num_computed_tokens、resumed_req_ids 等）
+* 效果：4096 token 的 prompt 只跨 IPC 一次，之後 decode 步驟幾乎只傳幾個數字
+
 ### `FCFSRequestQueue` vs `PriorityRequestQueue`
 
 | | FCFS | Priority |
@@ -421,7 +450,7 @@ The asymmetry matters for preemption: in FCFS a preempted request goes back to t
 
 ---
 
-## 7. Request Lifecycle (Scheduler side)
+### Request Lifecycle (Scheduler side)
 
 ```
 add_request()                   finish_requests() / update_from_output()
@@ -434,12 +463,12 @@ add_request()                   finish_requests() / update_from_output()
                (num_computed_tokens = 0)
 ```
 
-### `add_request()` (line 1726)
+### `add_request()` (line 1733)
 
 - New request: `_enqueue_waiting_request()` + register in `self.requests` dict.
 - No KV allocation here. Prefix-cache lookup happens in `schedule()` at promotion time.
 
-### `finish_requests()` (line 1748)
+### `finish_requests()` (line 1755)
 
 Two-pass for efficiency:
 1. Batch-collect running vs. waiting targets into sets.
@@ -461,9 +490,9 @@ vLLM v1 has **no swap-to-CPU**. Preemption means losing all KV state and re-pref
 
 ---
 
-## 8. `schedule()` — The Algorithm (lines 341–942)
+## `schedule()` — The Algorithm (lines 348–949)
 
-### Phase 1: RUNNING requests (lines 378–545)
+### Phase 1: RUNNING requests (lines 384--561)
 
 ```python
 for request in self.running:
@@ -486,7 +515,7 @@ for request in self.running:
             break   # preempted ourselves; give up
 ```
 
-### Phase 2: WAITING requests (lines 556–843)
+### Phase 2: WAITING requests (lines 564–843)
 
 Only entered if no preemptions occurred this step.
 
@@ -537,7 +566,7 @@ _update_after_schedule(scheduler_output)
 
 ---
 
-## 9. `update_from_output()` — The Feedback Loop (line 1295)
+### `update_from_output()` — The Feedback Loop (line 1295)
 
 Called right after `execute_model()` returns.
 
@@ -564,7 +593,7 @@ for req_id, _ in num_scheduled_tokens.items():
 
 ---
 
-## 10. Prefix Caching
+### Prefix Caching
 
 ```
 Prompt: [tok_0 ... tok_1023 | tok_1024 ... tok_4095]
@@ -578,7 +607,7 @@ Full cache hit → `num_new_tokens = 1` → first step is already a decode step.
 
 ---
 
-## 11. Five Key Questions
+### Five Key Questions
 
 **Q1: Request too long for one batch?**  
 `enable_chunked_prefill=True` (default): `num_new_tokens` clamped to budget. Partial prefill happens; request stays in `running` and continues next step. `enable_chunked_prefill=False`: request stays in `waiting` until the full prompt fits in one budget.
@@ -597,7 +626,7 @@ None. The scheduler only sees `num_computed_tokens` vs `num_tokens_with_spec`.
 
 ---
 
-## 12. The Bigger Picture
+## The Bigger Picture
 
 ```
 Step 01 ✅  entrypoints/llm.py           User API (LLM class)
@@ -613,7 +642,7 @@ Step 07     entrypoints/openai/           Production API server
 
 ---
 
-## 13. The Complete Request Journey
+## The Complete Request Journey
 
 ```
 User: LLM.generate("Tell me a joke")
