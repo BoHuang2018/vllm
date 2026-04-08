@@ -703,3 +703,10 @@ User: LLM.generate("Tell me a joke")
 
 User sees: RequestOutput with decoded text, finished=True
 ```
+
+## Questions To Enhance Understanding
+Q1. A request with a 6000-token prompt arrives. max_num_scheduled_tokens = 2048. Walk me through what happens across the first few scheduling steps — what changes on the request object each step, and what goes into SchedulerOutput.
+
+Q2. The KV cache is nearly full. schedule() is processing the running queue and tries to allocate slots for request A. Allocation fails. Walk me through exactly what happens — which request gets preempted, what state gets reset, and where that request ends up after schedule() returns.
+
+Q3. Two steps after a request finishes, its req_id still needs to travel somewhere. Where does it go, and why can't it be discarded immediately when the request finishes?
